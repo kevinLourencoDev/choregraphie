@@ -7,6 +7,7 @@ require 'json'
 # It allows to support the unavailability of the local consul agent (for reboot, reinstall, ...)
 module Choregraphie
   class OutdatedPolicyError < RuntimeError; end
+  class LockTimeoutError < RuntimeError; end
 
   class ConsulLock < Primitive
     def initialize(options = {})
@@ -20,6 +21,7 @@ module Choregraphie
       raise ArgumentError, "You can't set both concurrency and service" if @options[:concurrency] && @options[:service]
 
       @options[:backoff] ||= 5 # seconds
+      @options[:max_wait] ||= 7200 # seconds (2h), timeout if lock holders don't change
 
       ConsulCommon.setup_consul(@options)
 
@@ -58,6 +60,7 @@ module Choregraphie
 
     def backoff(start_time, current_try)
       started = Time.now - start_time
+      check_holders_stale!
       Chef::Log.warn "Will sleep #{@options[:backoff]} between failures, current_try: #{current_try}, started #{human_duration(started)} ago" if (current_try % 100).zero?
       sleep @options[:backoff]
       false # indicates failure
@@ -78,6 +81,8 @@ module Choregraphie
       start = Time.now
       success = 0.upto(opts[:max_failures] || Float::INFINITY).any? do |tries|
         yield(start, tries) || backoff(start, tries)
+      rescue LockTimeoutError
+        raise
       rescue StandardError => e
         Chef::Log.warn "Error while #{action}-ing lock"
         Chef::Log.warn e
@@ -93,7 +98,11 @@ module Choregraphie
 
     def register(choregraphie)
       choregraphie.before do
-        wait_until(:enter) { semaphore.enter(**lock_opts) }
+        wait_until(:enter) do
+          sem = semaphore
+          @_last_seen_holders = sem.current_holders
+          sem.enter(**lock_opts)
+        end
         begin
           ensure_latest_policy!
         rescue StandardError
@@ -154,6 +163,24 @@ module Choregraphie
       Chef::Log.warn "Failed to check policy freshness: #{e.class} - #{e.message}. Continuing anyway (fail-open)."
     end
 
+    def check_holders_stale!
+      return if @_last_seen_holders.nil?
+
+      @holders_unchanged_since ||= Time.now
+
+      if @_last_seen_holders != @last_holders
+        @last_holders = @_last_seen_holders.dup
+        @holders_unchanged_since = Time.now
+      end
+
+      stale_secs = Time.now - @holders_unchanged_since
+      return unless stale_secs >= @options[:max_wait]
+
+      raise LockTimeoutError,
+            "Lock holders for #{path} have not changed for #{human_duration(stale_secs)} " \
+            "(max_wait: #{human_duration(@options[:max_wait])}). Lock appears stuck. Aborting."
+    end
+
     def path
       @options[:path].sub(%r{^/}, '')
     end
@@ -205,6 +232,10 @@ module Choregraphie
       @cas  = new_lock['ModifyIndex']
       @dc   = dc
       @token = token
+    end
+
+    def current_holders
+      holders.dup
     end
 
     def already_entered?(opts)

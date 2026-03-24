@@ -20,9 +20,11 @@ describe Choregraphie::ConsulLock do
       it 'must enter the lock' do
         failing_lock = double('failing_lock')
         expect(failing_lock).to receive(:enter).with(name: 'my_node').exactly(fails).times.and_return(false) if fails > 0
+        allow(failing_lock).to receive(:current_holders).and_return({})
 
         lock = double('lock')
         expect(lock).to receive(:enter).with(name: 'my_node').and_return(true)
+        allow(lock).to receive(:current_holders).and_return({})
 
         expect(Semaphore).to receive(:get_or_create).and_return(*([failing_lock] * fails + [lock]))
 
@@ -62,10 +64,29 @@ describe Choregraphie::ConsulLock do
       lock = double('lock')
       expect(lock).to receive(:enter).with(name: 'my_node').and_return(true)
 
+      allow(lock).to receive(:current_holders).and_return({})
+
       expect(Semaphore).to receive(:get_or_create).with('chef_lock/test', concurrency: 3, dc: nil, token: nil, consul_backup_url: nil).and_return(lock)
 
       choregraphie_service.before.each(&:call)
     end
+  end
+
+  describe 'max_wait timeout' do
+    it 'raises LockTimeoutError when holders have not changed for max_wait' do
+      choregraphie_timeout = Choregraphie::Choregraphie.new('test_timeout') do
+        consul_lock(path: '/chef_lock/test', id: 'my_node', concurrency: 1, backoff: 1, max_wait: 1)
+      end
+
+      lock = double('lock')
+      allow(lock).to receive(:enter).with(name: 'my_node').and_return(false)
+      allow(lock).to receive(:current_holders).and_return({ 'stuck_node' => '2026-01-01' })
+      allow(Semaphore).to receive(:get_or_create).and_return(lock)
+
+      expect { choregraphie_timeout.before.each(&:call) }
+        .to raise_error(Choregraphie::LockTimeoutError, /Lock holders.*have not changed/)
+    end
+
   end
 
   describe 'ensure_latest_policy' do
@@ -78,6 +99,7 @@ describe Choregraphie::ConsulLock do
     before do
       lock = double('lock')
       allow(lock).to receive(:enter).with(name: 'my_node').and_return(true)
+      allow(lock).to receive(:current_holders).and_return({})
       allow(Semaphore).to receive(:get_or_create).and_return(lock)
 
       Chef::Config[:policy_name] = 'my_policy'
@@ -92,6 +114,7 @@ describe Choregraphie::ConsulLock do
 
       enter_lock = double('enter_lock')
       allow(enter_lock).to receive(:enter).with(name: 'my_node').and_return(true)
+      allow(enter_lock).to receive(:current_holders).and_return({})
 
       exit_lock = double('exit_lock')
       expect(exit_lock).to receive(:exit).with(name: 'my_node').and_return(true)
@@ -125,6 +148,7 @@ describe Choregraphie::ConsulLock do
 
       lock = double('lock')
       allow(lock).to receive(:enter).with(name: 'my_node').and_return(true)
+      allow(lock).to receive(:current_holders).and_return({})
       allow(Semaphore).to receive(:get_or_create).and_return(lock)
 
       expect(Chef::ServerAPI).not_to receive(:new)
@@ -155,6 +179,7 @@ describe Choregraphie::ConsulLock do
 
       enter_lock = double('enter_lock')
       allow(enter_lock).to receive(:enter).with(name: 'my_node').and_return(true)
+      allow(enter_lock).to receive(:current_holders).and_return({})
 
       exit_lock = double('exit_lock')
       expect(exit_lock).to receive(:exit).with(name: 'my_node').and_return(true)

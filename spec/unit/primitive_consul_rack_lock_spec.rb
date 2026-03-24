@@ -19,9 +19,11 @@ describe Choregraphie::ConsulLock do
       it 'must enter the lock' do
         failing_lock = double('failing_lock')
         expect(failing_lock).to receive(:enter).with(name: 'my_rack', server: 'my_node').exactly(fails).times.and_return(false) if fails > 0
+        allow(failing_lock).to receive(:current_holders).and_return({})
 
         lock = double('lock')
         expect(lock).to receive(:enter).with(name: 'my_rack', server: 'my_node').and_return(true)
+        allow(lock).to receive(:current_holders).and_return({})
 
         expect(SemaphoreByRack).to receive(:get_or_create).and_return(*([failing_lock] * fails + [lock]))
 
